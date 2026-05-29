@@ -79,11 +79,6 @@ export default {
       // 4. Upsert Klaviyo profile
       await upsertKlaviyoProfile(env, email, properties);
 
-      // 5. Optionally subscribe to list
-      if (env.KLAVIYO_LIST_ID && customer.accepts_marketing) {
-        await subscribeKlaviyoProfile(env, email, env.KLAVIYO_LIST_ID);
-      }
-
       return new Response('Synced', { status: 200 });
     } catch (err) {
       console.error('Sync error:', err.message);
