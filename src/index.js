@@ -1,7 +1,7 @@
 // Shopify → Klaviyo Customer Metafield Sync
-// Receives Shopify customer webhooks, fetches metafields, syncs to Klaviyo
+// Receives Shopify customer webhooks, fetches metafields, and syncs to Klaviyo
 
-const METAFIELD_MAP = {
+const SHOPIFY_METAFIELD_TO_KLAVIYO_PROPERTY = {
   "counterpoint:LOY_1": "Loyalty Program 1",
   "counterpoint:LOY_2": "Loyalty Program 2",
   "counterpoint:LOY_3": "Loyalty Program 3",
@@ -20,15 +20,13 @@ const METAFIELD_MAP = {
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-
-    // Health check
-    if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', service: 'shopify-klaviyo-sync' });
-    }
-
     if (request.method !== 'POST') {
       return new Response('Method not allowed', { status: 405 });
+    }
+
+    const url = new URL(request.url);
+    if (url.pathname === '/health') {
+      return Response.json({ status: 'ok', service: 'shopify-klaviyo-sync' });
     }
 
     // Verify webhook signature
@@ -43,6 +41,7 @@ export default {
     }
 
     const topic = request.headers.get('X-Shopify-Topic');
+
     if (!topic || !topic.startsWith('customers/')) {
       return new Response('Ignored', { status: 200 });
     }
@@ -63,7 +62,7 @@ export default {
       // 1. Fetch metafields from Shopify
       const metafields = await fetchShopifyMetafields(env, customer.id);
 
-      // 2. Map metafields to Klaviyo properties using our mapping
+      // 2. Build properties — set to null for missing/empty metafields
       const properties = buildKlaviyoProperties(metafields);
 
       // 3. Add standard Shopify fields
@@ -90,6 +89,7 @@ export default {
   }
 };
 
+// ── Verify Shopify webhook HMAC ──
 async function verifyShopifyWebhook(body, hmacHeader, secret) {
   if (!hmacHeader || !secret) return false;
   const encoder = new TextEncoder();
@@ -103,6 +103,7 @@ async function verifyShopifyWebhook(body, hmacHeader, secret) {
   return computed === hmacHeader;
 }
 
+// ── Fetch customer metafields via Shopify Admin GraphQL ──
 async function fetchShopifyMetafields(env, customerId) {
   const query = `
     query {
@@ -131,37 +132,54 @@ async function fetchShopifyMetafields(env, customerId) {
   return edges.map(e => e.node).filter(Boolean);
 }
 
+// ── Map Shopify metafields → Klaviyo properties ──
+// Key change: ALL mapped properties are included.
+// Missing/empty metafields → null (clears the Klaviyo property)
 function buildKlaviyoProperties(metafields) {
   const properties = {};
-  for (const mf of metafields) {
-    const mapKey = mf.namespace + ':' + mf.key;
-    const propKey = METAFIELD_MAP[mapKey];
 
-    // Only sync metafields that are in our mapping
-    if (!propKey) continue;
+  // Index existing metafields by "namespace:key"
+  const mfMap = {};
+  for (const mf of metafields) {
+    const mfKey = `${mf.namespace}:${mf.key}`;
+    mfMap[mfKey] = mf;
+  }
+
+  // For every mapped property, set value or null
+  for (const [mfKey, klaviyoProp] of Object.entries(SHOPIFY_METAFIELD_TO_KLAVIYO_PROPERTY)) {
+    const mf = mfMap[mfKey];
+
+    if (!mf || mf.value === null || mf.value === undefined || mf.value === '') {
+      // Metafield missing or empty → clear the Klaviyo property
+      properties[klaviyoProp] = null;
+      continue;
+    }
 
     switch (mf.type) {
-      case 'number_integer':  properties[propKey] = parseInt(mf.value, 10); break;
-      case 'number_decimal':  properties[propKey] = parseFloat(mf.value); break;
-      case 'boolean':         properties[propKey] = mf.value === 'true'; break;
+      case 'number_integer':  properties[klaviyoProp] = parseInt(mf.value, 10); break;
+      case 'number_decimal':  properties[klaviyoProp] = parseFloat(mf.value); break;
+      case 'boolean':         properties[klaviyoProp] = mf.value === 'true'; break;
       case 'json':
-        try { properties[propKey] = JSON.parse(mf.value); }
-        catch { properties[propKey] = mf.value; }
+        try { properties[klaviyoProp] = JSON.parse(mf.value); }
+        catch { properties[klaviyoProp] = mf.value; }
         break;
-      default:                properties[propKey] = mf.value;
+      default:                properties[klaviyoProp] = mf.value;
     }
   }
+
   return properties;
 }
 
+// ── Upsert Klaviyo profile (create or update) ──
 async function upsertKlaviyoProfile(env, email, properties) {
   const headers = {
     'Content-Type': 'application/json',
-    'Authorization': 'Klaviyo-API-Key ' + env.KLAVIYO_API_KEY,
+    'Authorization': `Klaviyo-API-Key ${env.KLAVIYO_API_KEY}`,
     'accept': 'application/json',
     'revision': '2025-01-15'
   };
 
+  // Try creating the profile
   const createResp = await fetch('https://a.klaviyo.com/api/profiles/', {
     method: 'POST',
     headers,
@@ -171,15 +189,16 @@ async function upsertKlaviyoProfile(env, email, properties) {
   });
 
   if (createResp.status === 409) {
+    // Profile exists — look up ID, then PATCH
     const lookup = await fetch(
-      'https://a.klaviyo.com/api/profiles/?filter=equals(email,"' + email + '")',
+      `https://a.klaviyo.com/api/profiles/?filter=equals(email,"${email}")`,
       { headers }
     );
     const lookupData = await lookup.json();
     const profileId = lookupData.data?.[0]?.id;
     if (!profileId) throw new Error('Could not find existing Klaviyo profile');
 
-    const updateResp = await fetch('https://a.klaviyo.com/api/profiles/' + profileId + '/', {
+    const updateResp = await fetch(`https://a.klaviyo.com/api/profiles/${profileId}/`, {
       method: 'PATCH',
       headers,
       body: JSON.stringify({
@@ -192,12 +211,13 @@ async function upsertKlaviyoProfile(env, email, properties) {
   }
 }
 
+// ── Subscribe profile to a Klaviyo list ──
 async function subscribeKlaviyoProfile(env, email, listId) {
-  const resp = await fetch('https://a.klaviyo.com/api/lists/' + listId + '/relationships/profiles/', {
+  const resp = await fetch(`https://a.klaviyo.com/api/lists/${listId}/relationships/profiles/`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Klaviyo-API-Key ' + env.KLAVIYO_API_KEY,
+      'Authorization': `Klaviyo-API-Key ${env.KLAVIYO_API_KEY}`,
       'accept': 'application/json',
       'revision': '2025-01-15'
     },
