@@ -170,7 +170,7 @@ function buildKlaviyoProperties(metafields) {
   return properties;
 }
 
-// ── Upsert Klaviyo profile (create or update) ──
+// ── Upsert Klaviyo profile via Import API (reliable null handling) ──
 async function upsertKlaviyoProfile(env, email, properties) {
   const headers = {
     'Content-Type': 'application/json',
@@ -179,34 +179,18 @@ async function upsertKlaviyoProfile(env, email, properties) {
     'revision': '2025-01-15'
   };
 
-  // Try creating the profile
-  const createResp = await fetch('https://a.klaviyo.com/api/profiles/', {
+  const resp = await fetch('https://a.klaviyo.com/api/profile-import/', {
     method: 'POST',
     headers,
     body: JSON.stringify({
-      data: { type: 'profile', attributes: { email, properties } }
+      data: {
+        type: 'profile',
+        attributes: { email, properties }
+      }
     })
   });
 
-  if (createResp.status === 409) {
-    // Profile exists — look up ID, then PATCH
-    const lookup = await fetch(
-      `https://a.klaviyo.com/api/profiles/?filter=equals(email,"${email}")`,
-      { headers }
-    );
-    const lookupData = await lookup.json();
-    const profileId = lookupData.data?.[0]?.id;
-    if (!profileId) throw new Error('Could not find existing Klaviyo profile');
-
-    const updateResp = await fetch(`https://a.klaviyo.com/api/profiles/${profileId}/`, {
-      method: 'PATCH',
-      headers,
-      body: JSON.stringify({
-        data: { type: 'profile', id: profileId, attributes: { properties } }
-      })
-    });
-    if (!updateResp.ok) throw new Error('Klaviyo update failed: ' + await updateResp.text());
-  } else if (!createResp.ok && createResp.status !== 201) {
-    throw new Error('Klaviyo upsert failed: ' + await createResp.text());
+  if (!resp.ok) {
+    throw new Error('Klaviyo profile import failed: ' + await resp.text());
   }
 }
