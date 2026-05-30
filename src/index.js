@@ -151,7 +151,7 @@ function buildKlaviyoProperties(metafields) {
 
     if (!mf || mf.value === null || mf.value === undefined || mf.value === '') {
       // Metafield missing or empty → clear the Klaviyo property
-      properties[klaviyoProp] = null;
+      properties[klaviyoProp] = '';
       continue;
     }
 
