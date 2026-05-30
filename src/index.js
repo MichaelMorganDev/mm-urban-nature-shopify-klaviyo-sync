@@ -62,8 +62,8 @@ export default {
       // 1. Fetch metafields from Shopify
       const metafields = await fetchShopifyMetafields(env, customer.id);
 
-      // 2. Build properties — set to null for missing/empty metafields
-      const properties = buildKlaviyoProperties(metafields);
+      // 2. Build properties and list of properties to unset
+      const { properties, unsetKeys } = buildKlaviyoProperties(metafields);
 
       // 3. Add standard Shopify fields
       properties.shopify_customer_id = String(customer.id);
@@ -76,7 +76,7 @@ export default {
       }
 
       // 4. Upsert Klaviyo profile
-      await upsertKlaviyoProfile(env, email, properties);
+      await upsertKlaviyoProfile(env, email, properties, unsetKeys);
 
       return new Response('Synced', { status: 200 });
     } catch (err) {
@@ -133,10 +133,12 @@ async function fetchShopifyMetafields(env, customerId) {
 }
 
 // ── Map Shopify metafields → Klaviyo properties ──
-// Key change: ALL mapped properties are included.
-// Missing/empty metafields → null (clears the Klaviyo property)
+// Returns: { properties: {...}, unsetKeys: [...] }
+// - properties with values → set normally
+// - missing/empty metafields → added to unsetKeys for removal
 function buildKlaviyoProperties(metafields) {
   const properties = {};
+  const unsetKeys = [];
 
   // Index existing metafields by "namespace:key"
   const mfMap = {};
@@ -145,13 +147,12 @@ function buildKlaviyoProperties(metafields) {
     mfMap[mfKey] = mf;
   }
 
-  // For every mapped property, set value or null
   for (const [mfKey, klaviyoProp] of Object.entries(SHOPIFY_METAFIELD_TO_KLAVIYO_PROPERTY)) {
     const mf = mfMap[mfKey];
 
     if (!mf || mf.value === null || mf.value === undefined || mf.value === '') {
-      // Metafield missing or empty → clear the Klaviyo property
-      properties[klaviyoProp] = '';
+      // Metafield missing or empty → mark for unset (full removal)
+      unsetKeys.push(klaviyoProp);
       continue;
     }
 
@@ -167,11 +168,12 @@ function buildKlaviyoProperties(metafields) {
     }
   }
 
-  return properties;
+  return { properties, unsetKeys };
 }
 
-// ── Upsert Klaviyo profile via Import API (reliable null handling) ──
-async function upsertKlaviyoProfile(env, email, properties) {
+// ── Upsert Klaviyo profile using Create or Update Profile endpoint ──
+// Uses meta.patch_properties.unset to fully remove cleared properties
+async function upsertKlaviyoProfile(env, email, properties, unsetKeys) {
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Klaviyo-API-Key ${env.KLAVIYO_API_KEY}`,
@@ -179,18 +181,29 @@ async function upsertKlaviyoProfile(env, email, properties) {
     'revision': '2025-01-15'
   };
 
-  const resp = await fetch('https://a.klaviyo.com/api/profile-import/', {
+  // Build the request body
+  const data = {
+    type: 'profile',
+    attributes: { email, properties }
+  };
+
+  // Add unset keys if any
+  if (unsetKeys.length > 0) {
+    data.meta = {
+      patch_properties: {
+        unset: unsetKeys
+      }
+    };
+  }
+
+  // Use Create or Update Profile endpoint (creates if new, updates if exists)
+  const resp = await fetch('https://a.klaviyo.com/api/profiles/', {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      data: {
-        type: 'profile',
-        attributes: { email, properties }
-      }
-    })
+    body: JSON.stringify({ data })
   });
 
-  if (!resp.ok) {
-    throw new Error('Klaviyo profile import failed: ' + await resp.text());
+  if (!resp.ok && resp.status !== 201 && resp.status !== 200) {
+    throw new Error('Klaviyo upsert failed: ' + await resp.text());
   }
 }
