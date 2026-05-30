@@ -62,8 +62,8 @@ export default {
       // 1. Fetch metafields from Shopify
       const metafields = await fetchShopifyMetafields(env, customer.id);
 
-      // 2. Build properties — set to null for missing/empty metafields
-      const properties = buildKlaviyoProperties(metafields);
+      // 2. Build properties and list of properties to unset
+      const { properties, unsetKeys } = buildKlaviyoProperties(metafields);
 
       // 3. Add standard Shopify fields
       properties.shopify_customer_id = String(customer.id);
@@ -76,7 +76,7 @@ export default {
       }
 
       // 4. Upsert Klaviyo profile
-      await upsertKlaviyoProfile(env, email, properties);
+      await upsertKlaviyoProfile(env, email, properties, unsetKeys);
 
       return new Response('Synced', { status: 200 });
     } catch (err) {
@@ -133,10 +133,12 @@ async function fetchShopifyMetafields(env, customerId) {
 }
 
 // ── Map Shopify metafields → Klaviyo properties ──
-// Key change: ALL mapped properties are included.
-// Missing/empty metafields → null (clears the Klaviyo property)
+// Returns: { properties: {...}, unsetKeys: [...] }
+// - properties with values → set normally
+// - missing/empty metafields → added to unsetKeys for full removal
 function buildKlaviyoProperties(metafields) {
   const properties = {};
+  const unsetKeys = [];
 
   // Index existing metafields by "namespace:key"
   const mfMap = {};
@@ -145,13 +147,12 @@ function buildKlaviyoProperties(metafields) {
     mfMap[mfKey] = mf;
   }
 
-  // For every mapped property, set value or null
   for (const [mfKey, klaviyoProp] of Object.entries(SHOPIFY_METAFIELD_TO_KLAVIYO_PROPERTY)) {
     const mf = mfMap[mfKey];
 
     if (!mf || mf.value === null || mf.value === undefined || mf.value === '') {
-      // Metafield missing or empty → clear the Klaviyo property
-      properties[klaviyoProp] = '';
+      // Metafield missing or empty → fully remove via unset
+      unsetKeys.push(klaviyoProp);
       continue;
     }
 
@@ -167,11 +168,12 @@ function buildKlaviyoProperties(metafields) {
     }
   }
 
-  return properties;
+  return { properties, unsetKeys };
 }
 
-// ── Upsert Klaviyo profile (create or update) ──
-async function upsertKlaviyoProfile(env, email, properties) {
+// ── Upsert Klaviyo profile using Create or Update Profile endpoint ──
+// Uses meta.patch_properties.unset to fully remove cleared properties
+async function upsertKlaviyoProfile(env, email, properties, unsetKeys) {
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Klaviyo-API-Key ${env.KLAVIYO_API_KEY}`,
@@ -179,17 +181,22 @@ async function upsertKlaviyoProfile(env, email, properties) {
     'revision': '2025-01-15'
   };
 
-  // Try creating the profile
+  const meta = unsetKeys.length > 0
+    ? { patch_properties: { unset: unsetKeys } }
+    : undefined;
+
+  // Try creating the profile first
+  const createBody = { data: { type: 'profile', attributes: { email, properties } } };
+  if (meta) createBody.data.meta = meta;
+
   const createResp = await fetch('https://a.klaviyo.com/api/profiles/', {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      data: { type: 'profile', attributes: { email, properties } }
-    })
+    body: JSON.stringify(createBody)
   });
 
   if (createResp.status === 409) {
-    // Profile exists — look up ID, then PATCH
+    // Profile exists — look up ID, then PATCH with unset
     const lookup = await fetch(
       `https://a.klaviyo.com/api/profiles/?filter=equals(email,"${email}")`,
       { headers }
@@ -198,12 +205,13 @@ async function upsertKlaviyoProfile(env, email, properties) {
     const profileId = lookupData.data?.[0]?.id;
     if (!profileId) throw new Error('Could not find existing Klaviyo profile');
 
+    const updateBody = { data: { type: 'profile', id: profileId, attributes: { properties } } };
+    if (meta) updateBody.data.meta = meta;
+
     const updateResp = await fetch(`https://a.klaviyo.com/api/profiles/${profileId}/`, {
       method: 'PATCH',
       headers,
-      body: JSON.stringify({
-        data: { type: 'profile', id: profileId, attributes: { properties } }
-      })
+      body: JSON.stringify(updateBody)
     });
     if (!updateResp.ok) throw new Error('Klaviyo update failed: ' + await updateResp.text());
   } else if (!createResp.ok && createResp.status !== 201) {
