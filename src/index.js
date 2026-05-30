@@ -181,29 +181,40 @@ async function upsertKlaviyoProfile(env, email, properties, unsetKeys) {
     'revision': '2025-01-15'
   };
 
-  // Build the request body
-  const data = {
-    type: 'profile',
-    attributes: { email, properties }
-  };
+  const meta = unsetKeys.length > 0
+    ? { patch_properties: { unset: unsetKeys } }
+    : undefined;
 
-  // Add unset keys if any
-  if (unsetKeys.length > 0) {
-    data.meta = {
-      patch_properties: {
-        unset: unsetKeys
-      }
-    };
-  }
+  // Try creating the profile first
+  const createBody = { data: { type: 'profile', attributes: { email, properties } } };
+  if (meta) createBody.data.meta = meta;
 
-  // Use Create or Update Profile endpoint (creates if new, updates if exists)
-  const resp = await fetch('https://a.klaviyo.com/api/profiles/', {
+  const createResp = await fetch('https://a.klaviyo.com/api/profiles/', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ data })
+    body: JSON.stringify(createBody)
   });
 
-  if (!resp.ok && resp.status !== 201 && resp.status !== 200) {
-    throw new Error('Klaviyo upsert failed: ' + await resp.text());
+  if (createResp.status === 409) {
+    // Profile exists — look up ID, then PATCH with unset
+    const lookup = await fetch(
+      `https://a.klaviyo.com/api/profiles/?filter=equals(email,"${email}")`,
+      { headers }
+    );
+    const lookupData = await lookup.json();
+    const profileId = lookupData.data?.[0]?.id;
+    if (!profileId) throw new Error('Could not find existing Klaviyo profile');
+
+    const updateBody = { data: { type: 'profile', id: profileId, attributes: { properties } } };
+    if (meta) updateBody.data.meta = meta;
+
+    const updateResp = await fetch(`https://a.klaviyo.com/api/profiles/${profileId}/`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify(updateBody)
+    });
+    if (!updateResp.ok) throw new Error('Klaviyo update failed: ' + await updateResp.text());
+  } else if (!createResp.ok && createResp.status !== 201) {
+    throw new Error('Klaviyo upsert failed: ' + await createResp.text());
   }
 }
