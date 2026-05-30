@@ -1,7 +1,8 @@
-// Shopify → Klaviyo Customer Metafield Sync
-// Receives Shopify customer webhooks, fetches metafields, and syncs to Klaviyo
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
-const SHOPIFY_METAFIELD_TO_KLAVIYO_PROPERTY = {
+// src/index.js
+var SHOPIFY_METAFIELD_TO_KLAVIYO_PROPERTY = {
   "counterpoint:LOY_1": "Loyalty Program 1",
   "counterpoint:LOY_2": "Loyalty Program 2",
   "counterpoint:LOY_3": "Loyalty Program 3",
@@ -15,95 +16,77 @@ const SHOPIFY_METAFIELD_TO_KLAVIYO_PROPERTY = {
   "counterpoint:PhoneNumber": "Phone Number",
   "counterpoint:StoreID": "Store ID",
   "klaviyo:First_Sale_Date": "First Sale Date",
-  "klaviyo:Date_of_Birth": "Date of Birth",
+  "klaviyo:Date_of_Birth": "Date of Birth"
 };
-
-export default {
+var index_default = {
   async fetch(request, env) {
-    if (request.method !== 'POST') {
-      return new Response('Method not allowed', { status: 405 });
+    if (request.method !== "POST") {
+      return new Response("Method not allowed", { status: 405 });
     }
-
     const url = new URL(request.url);
-    if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', service: 'shopify-klaviyo-sync' });
+    if (url.pathname === "/health") {
+      return Response.json({ status: "ok", service: "shopify-klaviyo-sync" });
     }
-
-    // Verify webhook signature
     const body = await request.text();
     const isValid = await verifyShopifyWebhook(
       body,
-      request.headers.get('X-Shopify-Hmac-Sha256'),
+      request.headers.get("X-Shopify-Hmac-Sha256"),
       env.SHOPIFY_WEBHOOK_SECRET
     );
     if (!isValid) {
-      return new Response('Unauthorized', { status: 401 });
+      return new Response("Unauthorized", { status: 401 });
     }
-
-    const topic = request.headers.get('X-Shopify-Topic');
-
-    if (!topic || !topic.startsWith('customers/')) {
-      return new Response('Ignored', { status: 200 });
+    const topic = request.headers.get("X-Shopify-Topic");
+    if (!topic || !topic.startsWith("customers/")) {
+      return new Response("Ignored", { status: 200 });
     }
-
     let customer;
     try {
       customer = JSON.parse(body);
     } catch {
-      return new Response('Invalid JSON', { status: 400 });
+      return new Response("Invalid JSON", { status: 400 });
     }
-
     const email = customer.email;
     if (!email) {
-      return new Response('No email on customer', { status: 200 });
+      return new Response("No email on customer", { status: 200 });
     }
-
     try {
-      // 1. Fetch metafields from Shopify
       const metafields = await fetchShopifyMetafields(env, customer.id);
-
-      // 2. Build properties and list of properties to unset
       const { properties, unsetKeys } = buildKlaviyoProperties(metafields);
-
-      // 3. Add standard Shopify fields
       properties.shopify_customer_id = String(customer.id);
-      properties.shopify_tags = customer.tags || '';
-      properties.shopify_state = customer.state || '';
+      properties.shopify_tags = customer.tags || "";
+      properties.shopify_state = customer.state || "";
       if (customer.default_address) {
-        properties.shopify_city = customer.default_address.city || '';
-        properties.shopify_province = customer.default_address.province || '';
-        properties.shopify_country = customer.default_address.country || '';
+        properties.shopify_city = customer.default_address.city || "";
+        properties.shopify_province = customer.default_address.province || "";
+        properties.shopify_country = customer.default_address.country || "";
       }
-
-      // 4. Upsert Klaviyo profile
       await upsertKlaviyoProfile(env, email, properties, unsetKeys);
-
-      return new Response('Synced', { status: 200 });
+      return new Response("Synced", { status: 200 });
     } catch (err) {
-      console.error('Sync error:', err.message);
+      console.error("Sync error:", err.message);
       return new Response(JSON.stringify({ error: err.message }), {
         status: 500,
-        headers: { 'Content-Type': 'application/json' }
+        headers: { "Content-Type": "application/json" }
       });
     }
   }
 };
-
-// ── Verify Shopify webhook HMAC ──
 async function verifyShopifyWebhook(body, hmacHeader, secret) {
   if (!hmacHeader || !secret) return false;
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
-    'raw', encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false, ['sign']
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
   );
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(body));
+  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
   const computed = btoa(String.fromCharCode(...new Uint8Array(sig)));
   return computed === hmacHeader;
 }
-
-// ── Fetch customer metafields via Shopify Admin GraphQL ──
+__name(verifyShopifyWebhook, "verifyShopifyWebhook");
 async function fetchShopifyMetafields(env, customerId) {
   const query = `
     query {
@@ -115,106 +98,95 @@ async function fetchShopifyMetafields(env, customerId) {
         }
       }
     }`;
-
   const resp = await fetch(`https://${env.SHOPIFY_SHOP_DOMAIN}/admin/api/2025-01/graphql.json`, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': env.SHOPIFY_ACCESS_TOKEN
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": env.SHOPIFY_ACCESS_TOKEN
     },
     body: JSON.stringify({ query })
   });
-
   const data = await resp.json();
-  if (data.errors) throw new Error('Shopify API error: ' + JSON.stringify(data.errors));
-
+  if (data.errors) throw new Error("Shopify API error: " + JSON.stringify(data.errors));
   const edges = data.data?.customer?.metafields?.edges || [];
-  return edges.map(e => e.node).filter(Boolean);
+  return edges.map((e) => e.node).filter(Boolean);
 }
-
-// ── Map Shopify metafields → Klaviyo properties ──
-// Returns: { properties: {...}, unsetKeys: [...] }
-// - properties with values → set normally
-// - missing/empty metafields → added to unsetKeys for removal
+__name(fetchShopifyMetafields, "fetchShopifyMetafields");
 function buildKlaviyoProperties(metafields) {
   const properties = {};
   const unsetKeys = [];
-
-  // Index existing metafields by "namespace:key"
   const mfMap = {};
   for (const mf of metafields) {
     const mfKey = `${mf.namespace}:${mf.key}`;
     mfMap[mfKey] = mf;
   }
-
   for (const [mfKey, klaviyoProp] of Object.entries(SHOPIFY_METAFIELD_TO_KLAVIYO_PROPERTY)) {
     const mf = mfMap[mfKey];
-
-    if (!mf || mf.value === null || mf.value === undefined || mf.value === '') {
-      // Metafield missing or empty → clear the Klaviyo property
-      properties[klaviyoProp] = '';
+    if (!mf || mf.value === null || mf.value === void 0 || mf.value === "") {
+      unsetKeys.push(klaviyoProp);
       continue;
     }
-
     switch (mf.type) {
-      case 'number_integer':  properties[klaviyoProp] = parseInt(mf.value, 10); break;
-      case 'number_decimal':  properties[klaviyoProp] = parseFloat(mf.value); break;
-      case 'boolean':         properties[klaviyoProp] = mf.value === 'true'; break;
-      case 'json':
-        try { properties[klaviyoProp] = JSON.parse(mf.value); }
-        catch { properties[klaviyoProp] = mf.value; }
+      case "number_integer":
+        properties[klaviyoProp] = parseInt(mf.value, 10);
         break;
-      default:                properties[klaviyoProp] = mf.value;
+      case "number_decimal":
+        properties[klaviyoProp] = parseFloat(mf.value);
+        break;
+      case "boolean":
+        properties[klaviyoProp] = mf.value === "true";
+        break;
+      case "json":
+        try {
+          properties[klaviyoProp] = JSON.parse(mf.value);
+        } catch {
+          properties[klaviyoProp] = mf.value;
+        }
+        break;
+      default:
+        properties[klaviyoProp] = mf.value;
     }
   }
-
   return { properties, unsetKeys };
 }
-
-// ── Upsert Klaviyo profile using Create or Update Profile endpoint ──
-// Uses meta.patch_properties.unset to fully remove cleared properties
+__name(buildKlaviyoProperties, "buildKlaviyoProperties");
 async function upsertKlaviyoProfile(env, email, properties, unsetKeys) {
   const headers = {
-    'Content-Type': 'application/json',
-    'Authorization': `Klaviyo-API-Key ${env.KLAVIYO_API_KEY}`,
-    'accept': 'application/json',
-    'revision': '2025-01-15'
+    "Content-Type": "application/json",
+    "Authorization": `Klaviyo-API-Key ${env.KLAVIYO_API_KEY}`,
+    "accept": "application/json",
+    "revision": "2025-01-15"
   };
-
-  const meta = unsetKeys.length > 0
-    ? { patch_properties: { unset: unsetKeys } }
-    : undefined;
-
-  // Try creating the profile first
-  const createBody = { data: { type: 'profile', attributes: { email, properties } } };
+  const meta = unsetKeys.length > 0 ? { patch_properties: { unset: unsetKeys } } : void 0;
+  const createBody = { data: { type: "profile", attributes: { email, properties } } };
   if (meta) createBody.data.meta = meta;
-
-  const createResp = await fetch('https://a.klaviyo.com/api/profiles/', {
-    method: 'POST',
+  const createResp = await fetch("https://a.klaviyo.com/api/profiles/", {
+    method: "POST",
     headers,
     body: JSON.stringify(createBody)
   });
-
   if (createResp.status === 409) {
-    // Profile exists — look up ID, then PATCH with unset
     const lookup = await fetch(
       `https://a.klaviyo.com/api/profiles/?filter=equals(email,"${email}")`,
       { headers }
     );
     const lookupData = await lookup.json();
     const profileId = lookupData.data?.[0]?.id;
-    if (!profileId) throw new Error('Could not find existing Klaviyo profile');
-
-    const updateBody = { data: { type: 'profile', id: profileId, attributes: { properties } } };
+    if (!profileId) throw new Error("Could not find existing Klaviyo profile");
+    const updateBody = { data: { type: "profile", id: profileId, attributes: { properties } } };
     if (meta) updateBody.data.meta = meta;
-
     const updateResp = await fetch(`https://a.klaviyo.com/api/profiles/${profileId}/`, {
-      method: 'PATCH',
+      method: "PATCH",
       headers,
       body: JSON.stringify(updateBody)
     });
-    if (!updateResp.ok) throw new Error('Klaviyo update failed: ' + await updateResp.text());
+    if (!updateResp.ok) throw new Error("Klaviyo update failed: " + await updateResp.text());
   } else if (!createResp.ok && createResp.status !== 201) {
-    throw new Error('Klaviyo upsert failed: ' + await createResp.text());
+    throw new Error("Klaviyo upsert failed: " + await createResp.text());
   }
 }
+__name(upsertKlaviyoProfile, "upsertKlaviyoProfile");
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
