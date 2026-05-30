@@ -210,20 +210,3 @@ async function upsertKlaviyoProfile(env, email, properties) {
     throw new Error('Klaviyo upsert failed: ' + await createResp.text());
   }
 }
-
-// ── Subscribe profile to a Klaviyo list ──
-async function subscribeKlaviyoProfile(env, email, listId) {
-  const resp = await fetch(`https://a.klaviyo.com/api/lists/${listId}/relationships/profiles/`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Klaviyo-API-Key ${env.KLAVIYO_API_KEY}`,
-      'accept': 'application/json',
-      'revision': '2025-01-15'
-    },
-    body: JSON.stringify({
-      data: [{ type: 'profile', attributes: { email } }]
-    })
-  });
-  if (!resp.ok) console.error('List subscription failed:', await resp.text());
-}
