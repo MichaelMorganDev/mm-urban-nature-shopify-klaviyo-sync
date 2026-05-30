@@ -181,18 +181,13 @@ async function upsertKlaviyoProfile(env, email, properties, unsetKeys) {
     'revision': '2025-01-15'
   };
 
-  const meta = unsetKeys.length > 0
-    ? { patch_properties: { unset: unsetKeys } }
-    : undefined;
-
-  // Try creating the profile first
-  const createBody = { data: { type: 'profile', attributes: { email, properties } } };
-  if (meta) createBody.data.meta = meta;
-
+  // Try creating the profile first (no meta on POST — profile doesn't exist yet)
   const createResp = await fetch('https://a.klaviyo.com/api/profiles/', {
     method: 'POST',
     headers,
-    body: JSON.stringify(createBody)
+    body: JSON.stringify({
+      data: { type: 'profile', attributes: { email, properties } }
+    })
   });
 
   if (createResp.status === 409) {
@@ -205,8 +200,12 @@ async function upsertKlaviyoProfile(env, email, properties, unsetKeys) {
     const profileId = lookupData.data?.[0]?.id;
     if (!profileId) throw new Error('Could not find existing Klaviyo profile');
 
-    const updateBody = { data: { type: 'profile', id: profileId, attributes: { properties } } };
-    if (meta) updateBody.data.meta = meta;
+    const updateBody = {
+      data: { type: 'profile', id: profileId, attributes: { properties } }
+    };
+    if (unsetKeys.length > 0) {
+      updateBody.data.meta = { patch_properties: { unset: unsetKeys } };
+    }
 
     const updateResp = await fetch(`https://a.klaviyo.com/api/profiles/${profileId}/`, {
       method: 'PATCH',
